@@ -262,7 +262,13 @@ impl Selector<'_> {
                     continue; // cloned with its directory
                 }
                 if !self.repo.is_path_ignored(&path).unwrap_or(false) {
-                    selection.skip.insert(path); // untracked scratch: agents start clean
+                    // untracked scratch: agents start clean. Directories may still hold
+                    // ignored caches (`vendor/bundle/` ignored, `vendor/` not).
+                    if kind.is_dir() && self.include_ignored {
+                        self.walk_for_carried(&path, false, selection)?;
+                    } else {
+                        selection.skip.insert(path);
+                    }
                     continue;
                 }
             }
@@ -279,8 +285,25 @@ impl Selector<'_> {
                 Decision::Skip => {
                     selection.skip.insert(path);
                 }
-                Decision::Descend => self.walk(&path, true, selection)?,
+                Decision::Descend => self.walk_for_carried(&path, true, selection)?,
             }
+        }
+        Ok(())
+    }
+
+    /// Walk `dir` for entries to carry; skip it as a whole when there are none, so it
+    /// isn't recreated as an empty directory.
+    fn walk_for_carried(
+        &self,
+        dir: &Path,
+        in_ignored: bool,
+        selection: &mut Selection,
+    ) -> io::Result<()> {
+        let carried = selection.carried.len();
+        self.walk(dir, in_ignored, selection)?;
+        if selection.carried.len() == carried {
+            selection.skip.retain(|p| !p.starts_with(dir));
+            selection.skip.insert(dir.to_path_buf());
         }
         Ok(())
     }

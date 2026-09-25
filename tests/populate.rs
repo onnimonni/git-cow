@@ -736,3 +736,28 @@ fn carry_ignored_config_turns_carrying_off() {
     assert!(report.carried.is_empty(), "{:?}", report.carried);
     assert!(!wt.join("node_modules").exists());
 }
+
+#[test]
+fn carries_ignored_caches_inside_untracked_dirs() {
+    let (tmp, repo) = agent_fixture();
+    let wd = repo.workdir().unwrap();
+    // `vendor/bundle/` is ignored but `vendor/` itself is just untracked
+    write_aged(&wd.join(".gitignore"), "vendor/bundle/\n", HOUR / 2);
+    commit_all(&repo, "bundler");
+    fs::create_dir_all(wd.join("vendor/bundle/ruby")).unwrap();
+    fs::write(wd.join("vendor/bundle/ruby/gem.rb"), "gem").unwrap();
+    fs::write(wd.join("vendor/scratch.txt"), "scratch").unwrap();
+    fs::create_dir_all(wd.join("notes/deep")).unwrap();
+    fs::write(wd.join("notes/deep/todo.txt"), "todo").unwrap();
+
+    let wt = tmp.path().join("wt");
+    let report = add(&repo, &carry(wt.clone())).unwrap();
+    if report.cloned == 0 {
+        return;
+    }
+    assert!(report.carried.contains(&PathBuf::from("vendor/bundle")));
+    assert!(wt.join("vendor/bundle/ruby/gem.rb").exists());
+    assert!(!wt.join("vendor/scratch.txt").exists());
+    // untracked dirs without anything to carry aren't recreated empty
+    assert!(!wt.join("notes").exists());
+}

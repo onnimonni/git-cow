@@ -118,7 +118,22 @@ GIT_COW_DISABLE=1 git worktree add ...        # plain git
 correctness: the program is edited and rebuilt in the new worktree, it must print the new
 output, and no file in the source worktree may change.
 
-LANGUAGE_TABLE
+Measured on macOS (APFS). Times cover worktree creation plus setup and build:
+
+| language | build state carried | plain | git-cow | edit + rebuild in new worktree |
+|---|---|---|---|---|
+| Rust (cargo) | `target` | 2.3 s | 1.2 s | correct |
+| Zig | `.zig-cache`, `zig-out` | 5.7 s | 1.7 s | correct |
+| Elixir (mix) | `_build`, `deps` | 5.4 s | 2.7 s | correct |
+| PHP (composer) | `vendor` | 1.1 s | 1.1 s | correct |
+| Node (npm + tsc) | `node_modules`, `dist` | 2.0 s | 2.7 s | correct |
+| Java (Maven) | `target` | 1.4 s | 1.8 s | correct |
+| Java (Gradle) | `.gradle`, `build` | 0.6 s | 1.0 s | correct |
+| C# (.NET) | `bin`, `obj` | 1.2 s | 1.9 s | correct |
+| Ruby (bundler) | `vendor/bundle` | 0.6 s | 1.0 s | correct |
+| Go | `bin` | 0.2 s | 0.8 s | correct |
+| Python (uv) | none (virtualenv) | 0.1 s | 0.3 s | correct |
+| C (CMake) | none (build dir) | 0.4 s | 0.8 s | correct |
 
 Tiny projects mostly measure tool startup and git-cow's up-to-1-second safety wait (see
 below). The gains grow with dependency trees and compile times. Measured on real-sized
