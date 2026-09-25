@@ -27,6 +27,14 @@ fails() { ! "$@"; }
 clean() { local s; s=$(git -C "$1" status --porcelain) && [[ -z $s ]]; }
 same() { [[ $("${@:2}") == "$1" ]]; }
 export -f clean same fails
+# ignored build caches are only carried where files can be cloned (not e.g. on ext4)
+echo probe > "$tmp/reflink-probe"
+if [[ $(uname) == Darwin ]] || cp --reflink=always "$tmp/reflink-probe" "$tmp/reflink-probe2" 2>/dev/null; then
+  carried() { test -f "$1/node_modules/dep/index.js"; }
+else
+  carried() { test ! -e "$1/node_modules"; }
+fi
+export -f carried
 
 # --- fixture: repo with lfs, a submodule, some history ---
 git init -q sub && git -C sub commit -q --allow-empty -m sub
@@ -54,7 +62,7 @@ check "diff --cached empty" git -C "$wt" diff --cached --exit-code
 check "branch is feat" same feat git -C "$wt" branch --show-current
 check "worktree list shows 3" same 3 bash -c "git worktree list | wc -l | tr -d ' '"
 check "fsck" git -C "$wt" fsck --no-progress
-check "ignored node_modules carried" test -f "$wt/node_modules/dep/index.js"
+check "ignored node_modules carried (if the fs can clone)" carried "$wt"
 check "virtualenv not carried" test ! -e "$wt/.venv"
 check "update-index --refresh" git -C "$wt" update-index --refresh
 check "ls-files matches HEAD tree" same "$(git ls-tree -r --name-only HEAD)" git -C "$wt" ls-files
@@ -110,13 +118,13 @@ check "prints HEAD like git" bash -c "git worktree add ../w-out 2>/dev/null | gr
 check "post-checkout hook ran with git's arguments" bash -c "read -r old new flag < '$tmp/hook-ran' && [[ \$old =~ ^0+\$ && \$new == \$(git -C '$tmp/w-out' rev-parse HEAD) && \$flag == 1 ]]"
 check "-B resets branch at commit" bash -c "git worktree add -q -B feat-b ../w-b HEAD~1 && [[ \$(git -C '$tmp/w-b' rev-parse HEAD) == \$(git rev-parse HEAD~1) ]] && clean '$tmp/w-b'"
 check "--lock --reason" bash -c "git worktree add -q --lock --reason agent ../w-lock && git worktree list --porcelain | grep -q 'locked agent' && git worktree unlock ../w-lock"
-check "-C from elsewhere with relative path" bash -c "cd '$tmp' && git -C repo worktree add -q ../w-c && clean '$tmp/w-c' && test -f '$tmp/w-c/node_modules/dep/index.js'"
+check "-C from elsewhere with relative path" bash -c "cd '$tmp' && git -C repo worktree add -q ../w-c && clean '$tmp/w-c' && carried '$tmp/w-c'"
 check "--no-checkout passes through" bash -c "git worktree add -q --no-checkout ../w-nc && [[ \$(ls -A '$tmp/w-nc') == .git ]]"
-check "--orphan passes through" bash -c "git worktree add -q --orphan -b orph ../w-orph && [[ \$(git -C '$tmp/w-orph' branch --show-current) == orph ]]"
+git worktree add -h 2>&1 | grep -q -- --orphan && check "--orphan passes through" bash -c "git worktree add -q --orphan -b orph ../w-orph && [[ \$(git -C '$tmp/w-orph' branch --show-current) == orph ]]"
 check "populate failure falls back to git checkout" bash -c "GIT_COW_BIN=false git worktree add -q ../w-fb 2>/dev/null && clean '$tmp/w-fb' && test -f '$tmp/w-fb/README'"
 check "GIT_COW_DISABLE=1 is plain git" bash -c "GIT_COW_DISABLE=1 git worktree add -q ../w-plain && test ! -e '$tmp/w-plain/node_modules'"
 check "existing path fails like git" fails git worktree add -q ../w-out
-for w in w-out w-b w-lock w-c w-nc w-orph w-fb w-plain; do git worktree remove --force --force "$tmp/$w"; done
+for w in w-out w-b w-lock w-c w-nc w-orph w-fb w-plain; do [[ ! -e $tmp/$w ]] || git worktree remove --force --force "$tmp/$w"; done
 rm "$main/.git/hooks/post-checkout"
 
 echo "--- worktree management (real git)"
