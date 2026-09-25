@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest # APFS: clonefile
+          - os: ubuntu-latest # ext4: no copy-on-write, regular checkout fallback
+          - os: ubuntu-latest # XFS with reflink: FICLONE
+            xfs: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install git-lfs
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install git-lfs; else sudo apt-get install -y git-lfs; fi
+      - name: Mount XFS with reflink as TMPDIR
+        if: matrix.xfs
+        run: |
+          sudo apt-get install -y xfsprogs
+          truncate -s 4G /tmp/xfs.img
+          mkfs.xfs -q -m reflink=1 /tmp/xfs.img
+          sudo mkdir -p /mnt/xfs && sudo mount -o loop /tmp/xfs.img /mnt/xfs
+          sudo chown "$USER" /mnt/xfs
+          echo "TMPDIR=/mnt/xfs" >> "$GITHUB_ENV"
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - run: tests/e2e.sh
+
+  nix:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix build .#git-cow -L
+      - name: wrapper runs the real git
+        run: ./result/bin/git --version && ./result/bin/git-cow --version

@@ -1,0 +1,28 @@
+[package]
+name = "git-cow"
+version = "0.1.0"
+edition = "2021"
+description = "git worktrees backed by copy-on-write clones (APFS, btrfs, XFS, ZFS, ...)"
+license = "MIT"
+repository = "https://github.com/onnimonni/git-cow"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+git2 = { version = "0.21", default-features = false }
+ignore = "0.4.33"
+libc = "0.2"
+reflink-copy = "0.1.30"
+sha2 = "0.11.0"
+
+[dev-dependencies]
+libc = "0.2"
+sha2 = "0.11.0"
+tempfile = "3"
+
+[profile.dev.package."*"]
+debug = false
+strip = true
+
+[profile.release]
+lto = "thin"

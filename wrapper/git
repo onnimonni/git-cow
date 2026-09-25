@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# git wrapper: `git worktree add` creates the worktree with git (`--no-checkout`) and
+# fills it with copy-on-write clones via `git-cow populate`. Every other command goes
+# straight to the real git.
+#
+#   GIT_COW_REAL_GIT  real git binary (default: next `git` in PATH after this script)
+#   GIT_COW_BIN       git-cow binary (default: `git-cow` in PATH)
+#   GIT_COW_DISABLE=1 plain `git worktree add`
+
+real_git=${GIT_COW_REAL_GIT:-}
+if [[ -z $real_git ]]; then
+  IFS=: read -ra path_dirs <<<"$PATH"
+  for dir in "${path_dirs[@]}"; do
+    if [[ -x $dir/git && ! $dir/git -ef ${BASH_SOURCE[0]} ]]; then
+      real_git=$dir/git
+      break
+    fi
+  done
+  [[ -n $real_git ]] || { echo "git-cow: no git found in PATH" >&2; exit 127; }
+fi
+
+# fast path: only `worktree add` is changed
+if [[ -n ${GIT_COW_DISABLE:-} || " $* " != *" worktree "* ]]; then
+  exec "$real_git" "$@"
+fi
+
+# global options before the subcommand; -C changes where relative paths resolve
+globals=()
+base=$PWD
+while (($#)) && [[ $1 == -* ]]; do
+  case $1 in
+    -C)
+      [[ $2 == /* ]] && base=$2 || base=$base/$2
+      globals+=("$1" "$2"); shift 2 ;;
+    -c | --git-dir | --work-tree | --namespace | --config-env | --super-prefix)
+      globals+=("$1" "$2"); shift 2 ;;
+    *)
+      globals+=("$1"); shift ;;
+  esac
+done
+if [[ ${1:-} != worktree || ${2:-} != add ]]; then
+  exec "$real_git" "${globals[@]}" "$@"
+fi
+shift 2
+
+# `git worktree add` options: find <path>, drop --checkout (we add --no-checkout)
+args=()
+path=
+quiet=()
+while (($#)); do
+  case $1 in
+    --no-checkout | --orphan) # nothing to clone: let git do it
+      exec "$real_git" "${globals[@]}" worktree add "${args[@]}" "$@" ;;
+    --checkout) shift ;;
+    -q | --quiet) quiet=(-q); args+=("$1"); shift ;;
+    -b | -B | --reason) args+=("$1" "$2"); shift 2 ;;
+    --) args+=("$@"); [[ -z $path ]] && path=${2:-}; break ;;
+    -*) args+=("$1"); shift ;;
+    *) [[ -z $path ]] && path=$1; args+=("$1"); shift ;;
+  esac
+done
+
+"$real_git" "${globals[@]}" worktree add --no-checkout "${args[@]}" || exit $?
+
+[[ $path == /* ]] || path=$base/$path
+worktree=$(cd "$path" && pwd -P) || exit 1
+# The worktree git just created is ours; don't let the caller's GIT_DIR point elsewhere.
+wt_git() { env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE "$real_git" -C "$worktree" "$@"; }
+
+# clone from the worktree the command was run in (falls back to the main worktree)
+from=()
+if source_dir=$("$real_git" "${globals[@]}" rev-parse --show-toplevel 2>/dev/null); then
+  from=(--from "$source_dir")
+fi
+if ! "${GIT_COW_BIN:-git-cow}" populate "${quiet[@]}" "${from[@]}" "$worktree"; then
+  echo "git-cow: falling back to a regular checkout" >&2
+  wt_git reset --hard --no-recurse-submodules -q || exit $?
+fi
+
+# what `git worktree add` does after its checkout
+if head=$(wt_git rev-parse -q --verify HEAD); then
+  ((${#quiet[@]})) || wt_git log -1 --format='HEAD is now at %h %s'
+  null=${head//?/0}
+  wt_git hook run --ignore-missing post-checkout -- "$null" "$head" 1
+fi
