@@ -109,6 +109,7 @@ git config --add cow.exclude '!tmp/'          # carry a "not by default" entry a
 git config cow.requireInclude true            # carry nothing without .worktreeinclude (like Claude Code)
 git config cow.carryIgnored false             # only tracked files
 GIT_COW_DISABLE=1 git worktree add ...        # plain git
+GIT_COW_NO_SETTLE=1 git worktree add ...      # skip the up-to-1-second wait (see Correctness)
 ```
 
 ## Languages

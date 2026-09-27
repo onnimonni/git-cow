@@ -29,6 +29,11 @@ struct PopulateArgs {
     /// `git config --add cow.exclude <name|path|*.ext>`
     #[arg(long)]
     no_ignored: bool,
+    /// Return right after cloning instead of waiting for the clone's second to pass
+    /// (also `GIT_COW_NO_SETTLE=1`). Only safe when nothing edits the worktree within
+    /// that second with a tool that restores mtimes (`cp -p`, `rsync -t`).
+    #[arg(long)]
+    no_settle: bool,
     /// Only print warnings
     #[arg(short, long)]
     quiet: bool,
@@ -41,6 +46,7 @@ fn main() -> ExitCode {
     let opts = PopulateOptions {
         from: args.from,
         include_ignored: !args.no_ignored,
+        settle: !args.no_settle && std::env::var_os("GIT_COW_NO_SETTLE").is_none(),
     };
     match git_cow::populate(&args.worktree, &opts) {
         Ok(report) => {

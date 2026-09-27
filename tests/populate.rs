@@ -120,6 +120,7 @@ fn add(repo: &Repository, o: &AddOptions) -> anyhow::Result<Report> {
     let populate_opts = PopulateOptions {
         from: o.from.clone(),
         include_ignored: o.include_ignored,
+        settle: true,
     };
     populate(&path, &populate_opts)
 }
@@ -132,6 +133,7 @@ fn refuses_worktree_with_files() {
     let opts = PopulateOptions {
         from: None,
         include_ignored: true,
+        settle: true,
     };
     let err = populate(&wt, &opts).unwrap_err();
     assert!(err.to_string().contains("not a fresh worktree"), "{err}");

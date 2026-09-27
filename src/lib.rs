@@ -37,6 +37,10 @@ pub struct PopulateOptions {
     pub from: Option<PathBuf>,
     /// Carry ignored files (node_modules, build caches, ...) from the source worktree.
     pub include_ignored: bool,
+    /// Return only after the second of the last clone is over (see
+    /// `wait_until_second_after`). A caller that spends longer than that before anything
+    /// edits the worktree (starting a dev server, say) can skip the wait.
+    pub settle: bool,
 }
 
 #[derive(Debug, Default)]
@@ -83,6 +87,7 @@ pub fn populate(path: &Path, opts: &PopulateOptions) -> Result<Report> {
         from: opts.from.clone(),
         include_ignored: opts.include_ignored
             && wt.config()?.get_bool("cow.carryIgnored").unwrap_or(true),
+        settle: opts.settle,
     };
     let source = source_dir(&wt, opts)?;
     let mut report = Report {
@@ -95,8 +100,8 @@ pub fn populate(path: &Path, opts: &PopulateOptions) -> Result<Report> {
         return Ok(report);
     };
     match fill(&wt, &path, source.as_deref(), &commit, opts, &mut report) {
-        Ok(Some(last_old_mtime)) => wait_until_second_after(last_old_mtime),
-        Ok(None) => {}
+        Ok(Some(last_old_mtime)) if opts.settle => wait_until_second_after(last_old_mtime),
+        Ok(_) => {}
         Err(err) => {
             reset_to_fresh(&path);
             return Err(err);
