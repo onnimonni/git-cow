@@ -103,6 +103,9 @@ fn print_report(report: &Report, quiet: bool) {
     if !report.carried.is_empty() {
         summary += &format!("; carried {}", join_paths(&report.carried));
     }
+    if report.mix_relocated > 0 {
+        summary += &format!("; relocated {} Mix build files", report.mix_relocated);
+    }
     if !report.excluded.is_empty() {
         summary += &format!("; excluded {}", join_paths(&report.excluded));
     }

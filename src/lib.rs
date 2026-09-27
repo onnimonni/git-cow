@@ -14,6 +14,7 @@
 
 mod cow;
 mod lfs;
+mod mix;
 mod select;
 mod stat;
 
@@ -70,6 +71,8 @@ pub struct Report {
     /// git-lfs files left as pointers because they use `ext-*` extensions.
     pub lfs_unsupported: Vec<PathBuf>,
     pub warnings: Vec<String>,
+    /// Files of carried Mix builds rewritten to the new worktree's path (see `mix`).
+    pub mix_relocated: usize,
 }
 
 /// Fill the fresh worktree at `path` (containing only its `.git` file). On error the
@@ -100,8 +103,22 @@ pub fn populate(path: &Path, opts: &PopulateOptions) -> Result<Report> {
         return Ok(report);
     };
     match fill(&wt, &path, source.as_deref(), &commit, opts, &mut report) {
-        Ok(Some(last_old_mtime)) if opts.settle => wait_until_second_after(last_old_mtime),
-        Ok(_) => {}
+        Ok(last_old_mtime) => {
+            // A carried Mix build names the source worktree; moved, Mix keeps it.
+            if let Some(source) = source.as_deref().filter(|_| opts.include_ignored) {
+                if wt.config()?.get_bool("cow.relocateMix").unwrap_or(true) {
+                    match mix::relocate(source, &path) {
+                        Ok(files) => report.mix_relocated = files,
+                        Err(err) => report.warnings.push(format!(
+                            "Mix build not relocated, Mix will recompile it: {err:#}"
+                        )),
+                    }
+                }
+            }
+            if let Some(last_old_mtime) = last_old_mtime.filter(|_| opts.settle) {
+                wait_until_second_after(last_old_mtime);
+            }
+        }
         Err(err) => {
             reset_to_fresh(&path);
             return Err(err);

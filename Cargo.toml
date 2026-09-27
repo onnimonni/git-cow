@@ -9,6 +9,8 @@ repository = "https://github.com/onnimonni/git-cow"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+eetf = "0.12"
+flate2 = "1"
 git2 = { version = "0.21", default-features = false }
 ignore = "0.4.33"
 libc = "0.2"
