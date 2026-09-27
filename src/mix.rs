@@ -21,6 +21,7 @@
 use anyhow::{bail, Context, Result};
 use eetf::{Binary, ByteList, FixInteger, ImproperList, List, Map, Term, Tuple};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+use md5::{Digest, Md5};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -205,6 +206,7 @@ fn literals(data: &[u8], old: &str, new: &str) -> Result<Vec<u8>> {
     }
     let count = u32::from_be_bytes(table.get(0..4).context("empty literal table")?.try_into()?);
     let mut out = count.to_be_bytes().to_vec();
+    let mut literals = Vec::with_capacity(count as usize);
     let mut at = 4;
     for _ in 0..count {
         let len = u32::from_be_bytes(
@@ -216,16 +218,151 @@ fn literals(data: &[u8], old: &str, new: &str) -> Result<Vec<u8>> {
         let literal = table
             .get(at + 4..at + 4 + len)
             .context("truncated literal")?;
-        let rewritten = etf(literal, old, new, false)?;
-        out.extend_from_slice(&u32::try_from(rewritten.len())?.to_be_bytes());
-        out.extend_from_slice(&rewritten);
+        literals.push(etf(literal, old, new, false)?);
         at += 4 + len;
+    }
+    phoenix_template_hashes(&mut literals, old, new)?;
+    for literal in &literals {
+        out.extend_from_slice(&u32::try_from(literal.len())?.to_be_bytes());
+        out.extend_from_slice(literal);
     }
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&out)?;
     let mut chunk = u32::try_from(out.len())?.to_be_bytes().to_vec();
     chunk.extend_from_slice(&encoder.finish()?);
     Ok(chunk)
+}
+
+/// Phoenix's `embed_templates` compiles `__mix_recompile__?/0` to compare a literal
+/// `md5(sorted(Path.wildcard("#{dir}/#{pattern}.{#{extensions}}")))` of absolute
+/// template paths with the current one, so a moved module would still recompile
+/// (phoenixframework/phoenix_template#15). For each directory and glob literal of the
+/// module, the old hash is recomputed from the new worktree's files under their old
+/// paths; only a 16-byte literal it matches exactly is replaced, by the hash of the
+/// same files under their new paths. Nothing is replaced on a guess.
+fn phoenix_template_hashes(literals: &mut [Vec<u8>], old: &str, new: &str) -> Result<()> {
+    let decoded: Vec<Option<Term>> = literals
+        .iter()
+        .map(|l| Term::decode(l.as_slice()).ok())
+        .collect();
+    let hashes: Vec<[u8; 16]> = decoded
+        .iter()
+        .flatten()
+        .filter_map(|t| match t {
+            Term::Binary(Binary { bytes }) => bytes.as_slice().try_into().ok(),
+            _ => None,
+        })
+        .collect();
+    if hashes.is_empty() {
+        return Ok(());
+    }
+    let strings: Vec<String> = decoded
+        .iter()
+        .flatten()
+        .filter_map(|t| match t {
+            Term::Binary(Binary { bytes }) => String::from_utf8(bytes.clone()).ok(),
+            _ => None,
+        })
+        .collect();
+    let inside = format!("{new}/");
+    let dirs = strings
+        .iter()
+        .filter(|s| (s.as_str() == new || s.starts_with(&inside)) && Path::new(s).is_dir());
+    let patterns: Vec<&String> = strings
+        .iter()
+        .filter(|s| s.contains('*') && !s.starts_with('/'))
+        .collect();
+    // Phoenix's default engines, with and without LiveView's leex.
+    let extension_sets: [&[&str]; 3] = [
+        &["eex", "exs", "heex", "leex"],
+        &["eex", "exs", "heex"],
+        &["eex", "exs"],
+    ];
+
+    let mut replacements: Vec<([u8; 16], [u8; 16])> = Vec::new();
+    for dir in dirs {
+        for pattern in &patterns {
+            for extensions in extension_sets {
+                let files = template_files(dir, pattern, extensions);
+                if files.is_empty() {
+                    continue;
+                }
+                let digest = |root: &str| {
+                    let mut paths: Vec<String> = files
+                        .iter()
+                        .map(|f| format!("{root}{}", &f[new.len()..]))
+                        .collect();
+                    paths.sort();
+                    let mut md5 = Md5::new();
+                    paths.iter().for_each(|p| md5.update(p.as_bytes()));
+                    <[u8; 16]>::from(md5.finalize())
+                };
+                let before = digest(old);
+                if hashes.contains(&before) {
+                    replacements.push((before, digest(new)));
+                    break;
+                }
+            }
+        }
+    }
+    for (literal, term) in literals.iter_mut().zip(&decoded) {
+        let Some(Term::Binary(Binary { bytes })) = term else {
+            continue;
+        };
+        if let Some((_, after)) = replacements
+            .iter()
+            .find(|(before, _)| before.as_slice() == bytes.as_slice())
+        {
+            literal.clear();
+            Term::Binary(Binary::from(after.as_slice()))
+                .encode(&mut *literal)
+                .map_err(|e| anyhow::anyhow!("encode: {e:?}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// `Path.wildcard("#{dir}/#{pattern}.{#{extensions}}")` for the patterns
+/// `embed_templates` produces: an optional directory and a file-name glob with `*`.
+fn template_files(dir: &str, pattern: &str, extensions: &[&str]) -> Vec<String> {
+    let (sub, name_glob) = pattern.rsplit_once('/').unwrap_or(("", pattern));
+    if sub.contains('*') {
+        return Vec::new();
+    }
+    let base = if sub.is_empty() {
+        dir.to_owned()
+    } else {
+        format!("{dir}/{sub}")
+    };
+    let Ok(entries) = fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let matches = !name.starts_with('.')
+            && extensions.iter().any(|ext| {
+                name.strip_suffix(&format!(".{ext}"))
+                    .is_some_and(|stem| glob_match(name_glob, stem))
+            });
+        if matches {
+            files.push(format!("{base}/{name}"));
+        }
+    }
+    files
+}
+
+/// `*` matches any run of characters (file names have no `/`).
+fn glob_match(glob: &str, text: &str) -> bool {
+    match glob.split_once('*') {
+        None => glob == text,
+        Some((head, tail)) => {
+            text.starts_with(head)
+                && (head.len()..=text.len()).any(|i| glob_match(tail, &text[i..]))
+        }
+    }
 }
 
 /// Decodes an external term, rewrites it and encodes it again (zlib-compressed as
@@ -417,6 +554,39 @@ mod tests {
             Term::Binary(Binary::from(b"/wt/x/lib".as_slice()))
         );
         assert_eq!(&plain[8 + len + 4..], other.as_slice());
+    }
+
+    #[test]
+    fn glob_matches_like_path_wildcard() {
+        assert!(glob_match("*", "home.html"));
+        assert!(glob_match("*.html", "home.html"));
+        assert!(!glob_match("*.html", "home.text"));
+        assert!(glob_match("a*c", "abbc"));
+    }
+
+    #[test]
+    fn phoenix_template_hash_is_recomputed_only_on_an_exact_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let new = tmp.path().join("wt").to_str().unwrap().to_owned();
+        let old = "/src/app";
+        let dir = format!("{new}/lib/web/page_html");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(format!("{dir}/home.html.heex"), "").unwrap();
+        fs::write(format!("{dir}/notes.txt"), "").unwrap();
+        let md5 = |s: &str| <[u8; 16]>::from(Md5::digest(s.as_bytes()));
+        let old_hash = md5("/src/app/lib/web/page_html/home.html.heex");
+        let new_hash = md5(&format!("{dir}/home.html.heex"));
+        let unrelated = *b"Email (optional)";
+        let binary = |b: &[u8]| encode(&Term::Binary(Binary::from(b)));
+        let mut literals = vec![
+            binary(&old_hash),
+            binary(&unrelated),
+            binary(format!("{new}/lib/web").as_bytes()),
+            binary(b"page_html/*"),
+        ];
+        phoenix_template_hashes(&mut literals, old, &new).unwrap();
+        assert_eq!(literals[0], binary(&new_hash));
+        assert_eq!(literals[1], binary(&unrelated));
     }
 
     #[test]
